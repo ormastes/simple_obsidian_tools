@@ -1,15 +1,15 @@
 # Test Results
 
-**Generated:** 2026-03-16 01:32:18
-**Total Tests:** 94
+**Generated:** 2026-03-16 01:41:52
+**Total Tests:** 183
 **Status:** ⚠️ 5 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 89 | 94.7% |
-| ❌ Failed | 5 | 5.3% |
+| ✅ Passed | 178 | 97.3% |
+| ❌ Failed | 5 | 2.7% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
@@ -45,15 +45,6 @@
 
 ## ❌ Failed Tests (5)
 
-### 🔴 finds notes by title
-
-**File:** `test/unit/search_engine_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
-
----
-
 ### 🔴 creates links table
 
 **File:** `test/unit/indexer_spec.spl`
@@ -81,6 +72,15 @@
 
 ---
 
+### 🔴 finds notes by title
+
+**File:** `test/unit/search_engine_spec.spl`
+**Category:** Unit
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
 ### 🔴 creates tasks table
 
 **File:** `test/unit/indexer_spec.spl`
@@ -100,18 +100,18 @@
 
 ### Priority 1: Fix Failing Tests (5)
 
-1. **finds notes by title** - 
-2. **creates links table** - 
-3. **creates chunks table** - 
-4. **creates notes table** - 
+1. **creates links table** - 
+2. **creates chunks table** - 
+3. **creates notes table** - 
+4. **finds notes by title** - 
 5. **creates tasks table** - 
 
-### Priority 3: Stabilize Flaky Tests (25)
+### Priority 3: Stabilize Flaky Tests (26)
 
 Tests with intermittent failures:
-- detects stale notes (66.7% failure rate)
-- finds all tasks matching query (66.7% failure rate)
-- stores tags from frontmatter and inline (50.0% failure rate)
-- indexes wikilinks (66.7% failure rate)
-- indexes tasks (66.7% failure rate)
+- treats missing notes as stale (33.3% failure rate)
+- finds forward links (66.7% failure rate)
+- removes a note and its dependents (66.7% failure rate)
+- stores note title (50.0% failure rate)
+- computes higher authority for well-linked notes (66.7% failure rate)
 

@@ -82,6 +82,21 @@ fn operator_value(token: text, prefix: text) -> text:
 
 # --- Main parse function ---
 
+/**
+Parse a search query string into structured operators and freetext.
+Supported operators: `tag:`, `path:`, `title:`, `alias:`, `heading:`,
+`linkto:`, `linkedfrom:`, `type:`, `modified:recent`.
+
+```sdoctest
+>>> val q = parse_query("meeting notes tag:standup path:daily/")
+>>> q.freetext
+meeting notes
+>>> q.tag_filters
+[standup]
+>>> q.path_filters
+[daily/]
+```
+*/
 fn parse_query(raw: text) -> ParsedQuery:
     var result = empty_query()
     val tokens = tokenize_query(raw)
@@ -114,6 +129,18 @@ fn parse_query(raw: text) -> ParsedQuery:
     result.freetext = freetext_parts.join(" ")
     result
 
+/**
+Check whether a parsed query has any operator filters active.
+
+```sdoctest
+>>> val q1 = parse_query("plain search")
+>>> has_filters(q1)
+false
+>>> val q2 = parse_query("tag:meeting")
+>>> has_filters(q2)
+true
+```
+*/
 fn has_filters(q: ParsedQuery) -> bool:
     if q.tag_filters.len() > 0:
         return true

@@ -30,6 +30,22 @@ struct Chunk:
 
 # --- Frontmatter parsing ---
 
+/**
+Parse YAML frontmatter from Obsidian markdown content.
+Extracts title, aliases, and tags from the `---` fenced block.
+Falls back to first heading if no title in frontmatter.
+
+```sdoctest
+>>> val md = "---\ntitle: My Note\ntags: [a, b]\naliases: [mn]\n---\n# Body"
+>>> val meta = parse_frontmatter(md)
+>>> meta.title
+My Note
+>>> meta.tags
+[a, b]
+>>> meta.aliases
+[mn]
+```
+*/
 fn parse_frontmatter(content: text) -> NoteMeta:
     var title = ""
     var aliases: [text] = []
@@ -109,6 +125,19 @@ fn extract_first_heading(content: text) -> text:
 
 # --- Wikilink extraction ---
 
+/**
+Extract all `[[target]]` and `[[target|alias]]` wikilinks from content.
+
+```sdoctest
+>>> val links = extract_wikilinks("See [[api-design]] and [[meeting|Mon standup]]")
+>>> links.len()
+2
+>>> links[0].target
+api-design
+>>> links[1].alias
+Mon standup
+```
+*/
 fn extract_wikilinks(content: text) -> [WikiLink]:
     var links: [WikiLink] = []
     var i = 0
@@ -155,6 +184,20 @@ fn parse_wikilink_text(link_text: text) -> WikiLink:
 
 # --- Tag extraction ---
 
+/**
+Extract inline `#tag` patterns from content.
+Ignores heading markers (`# `, `## `) — only captures tags preceded by whitespace or SOL.
+
+```sdoctest
+>>> val tags = extract_tags("# Heading\nSome text #meeting #project")
+>>> tags.len()
+2
+>>> tags[0]
+meeting
+>>> tags[1]
+project
+```
+*/
 fn extract_tags(content: text) -> [text]:
     var tags: [text] = []
     var i = 0
@@ -190,6 +233,21 @@ fn extract_tags(content: text) -> [text]:
 
 # --- Task extraction ---
 
+/**
+Extract checkbox tasks (`- [ ]` open, `- [x]` done) from content.
+
+```sdoctest
+>>> val tasks = extract_tasks("- [ ] Buy milk\n- [x] Write docs")
+>>> tasks.len()
+2
+>>> tasks[0].status
+open
+>>> tasks[0].text_content
+Buy milk
+>>> tasks[1].status
+done
+```
+*/
 fn extract_tasks(content: text) -> [Task]:
     var tasks: [Task] = []
     val lines = content.split("\n")

@@ -1,5 +1,7 @@
 # Plan: Obsidian Vault Search MCP Server
 
+**See also:** [Requirements](../requirement/obsidian_search.md) | [Research](../research/obsidian_search.md) | [Design](../design/obsidian_search.md) | [Limitations](../bug/obsidian_search_limitations.md)
+
 ## Delivery Phases
 
 ### Phase 1: Foundation (4 tools)

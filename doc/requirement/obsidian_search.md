@@ -1,5 +1,7 @@
 # Requirements: Obsidian Vault Search MCP Server
 
+**See also:** [Research](../research/obsidian_search.md) | [Plan](../plan/obsidian_search.md) | [Design](../design/obsidian_search.md) | [Limitations](../bug/obsidian_search_limitations.md) | [Completion Report](../report/obsidian_search_complete_2026-03-16.md)
+
 ## Problem
 Obsidian vaults lack agent-facing search tooling. The existing LSP handles editor UX (symbols, references, hover), but AI agents need richer search: ranked results, graph traversal, authority scoring, and structured tool semantics.
 

@@ -1,5 +1,7 @@
 # Research: Obsidian Vault Search
 
+**See also:** [Requirements](../requirement/obsidian_search.md) | [Plan](../plan/obsidian_search.md) | [Design](../design/obsidian_search.md) | [Limitations](../bug/obsidian_search_limitations.md)
+
 ## Obsidian File Format
 - Notes are Markdown files (.md) in a directory tree
 - Frontmatter: YAML between `---` fences (title, tags, aliases)
