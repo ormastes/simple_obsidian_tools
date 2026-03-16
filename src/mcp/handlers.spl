@@ -4,7 +4,7 @@
 # and formats results as MCP tool responses.
 
 use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, LB, RB, SB_L, SB_R}
-use src.core.indexer.{IndexDb, NoteRecord, get_note_by_path, reindex_vault}
+use src.core.indexer.{IndexDb, NoteRecord, get_note_by_path, ensure_indexed}
 use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, search_tasks, search_decisions, read_note_content}
 use src.core.graph.{find_backlinks, find_forward_links, find_related, find_authoritative_docs, graph_walk, compute_authority, GraphNode}
 use src.core.ranker.{rank_results, explain_scores, ScoredResult, ScoreBreakdown}
@@ -69,6 +69,7 @@ fn format_breakdowns(breakdowns: [ScoreBreakdown]) -> text:
 # --- Main handler dispatch ---
 
 fn handle_tool_call(id: text, body: text, db: IndexDb, vault_path: text) -> text:
+    ensure_indexed(db, vault_path)
     val tool_name = extract_nested(body, "name")
 
     # Phase 1: Foundation

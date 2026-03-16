@@ -57,6 +57,25 @@ var DB_CHUNK_COUNT: i64 = 0
 var DB_LINK_COUNT: i64 = 0
 var DB_TASK_COUNT: i64 = 0
 var DB_NEXT_ID: i64 = 1
+var VAULT_INDEXED: bool = false
+
+# --- Lazy init ---
+
+fn ensure_indexed(db: IndexDb, vault_path: text):
+    if VAULT_INDEXED:
+        return
+    if vault_path == "":
+        return
+    reindex_vault(db, vault_path)
+    VAULT_INDEXED = true
+
+# --- Batch result struct ---
+
+struct NoteIndexResult:
+    note: NoteRecord
+    chunks: [ChunkRecord]
+    links: [LinkRecord]
+    tasks: [TaskRecord]
 
 # --- Database lifecycle ---
 
@@ -170,6 +189,78 @@ fn index_note(db: IndexDb, full_path: text, rel_path: text, content: text, mtime
 
     note_id
 
+# --- Index a single note (batch-collect variant) ---
+
+fn index_note_collect(full_path: text, rel_path: text, content: text, mtime: i64) -> NoteIndexResult:
+    val meta = parse_frontmatter(content)
+    val aliases_str = meta.aliases.join(",")
+
+    val inline_tags = extract_tags(content)
+    var all_tags: [text] = []
+    for t in meta.tags:
+        all_tags.push(t)
+    for t in inline_tags:
+        var found = false
+        for existing in all_tags:
+            if existing == t:
+                found = true
+                break
+        if not found:
+            all_tags.push(t)
+    val all_tags_str = all_tags.join(",")
+
+    val note_id = next_id()
+    val note = NoteRecord(
+        id: note_id,
+        path: rel_path,
+        title: meta.title,
+        aliases: aliases_str,
+        tags: all_tags_str,
+        frontmatter: meta.frontmatter_raw,
+        mtime: mtime,
+        weight: 1.0
+    )
+
+    var local_chunks: [ChunkRecord] = []
+    val chunks = chunk_by_heading(content)
+    for chunk in chunks:
+        val chunk_id = next_id()
+        val cr = ChunkRecord(
+            id: chunk_id,
+            note_id: note_id,
+            chunk_type: chunk.chunk_type,
+            heading_path: chunk.heading_path,
+            text_content: chunk.text_content
+        )
+        local_chunks.push(cr)
+
+    var local_links: [LinkRecord] = []
+    val wikilinks = extract_wikilinks(content)
+    for link in wikilinks:
+        val link_id = next_id()
+        val lr = LinkRecord(
+            id: link_id,
+            src_note_id: note_id,
+            dst_path: link.target,
+            anchor_text: link.alias
+        )
+        local_links.push(lr)
+
+    var local_tasks: [TaskRecord] = []
+    val tasks_list = extract_tasks(content)
+    for task in tasks_list:
+        val task_id = next_id()
+        val tr = TaskRecord(
+            id: task_id,
+            note_id: note_id,
+            status: task.status,
+            text_content: task.text_content,
+            line_num: task.line_num
+        )
+        local_tasks.push(tr)
+
+    NoteIndexResult(note: note, chunks: local_chunks, links: local_links, tasks: local_tasks)
+
 # --- Remove a note and its dependents ---
 
 fn remove_note(db: IndexDb, rel_path: text):
@@ -229,14 +320,33 @@ fn is_stale(db: IndexDb, rel_path: text, current_mtime: i64) -> bool:
 
 fn reindex_vault(db: IndexDb, vault_path: text) -> i64:
     val files = scan_vault(vault_path)
+    var batch_notes: [NoteRecord] = []
+    var batch_chunks: [ChunkRecord] = []
+    var batch_links: [LinkRecord] = []
+    var batch_tasks: [TaskRecord] = []
     var indexed_count: i64 = 0
     for file in files:
         val rel = relative_path(file, vault_path)
         val fsize = rt_file_size(file)
         if is_stale(db, rel, fsize):
             val content = rt_file_read_text(file) ?? ""
-            index_note(db, file, rel, content, fsize)
+            val result = index_note_collect(file, rel, content, fsize)
+            batch_notes.push(result.note)
+            for c in result.chunks:
+                batch_chunks.push(c)
+            for l in result.links:
+                batch_links.push(l)
+            for t in result.tasks:
+                batch_tasks.push(t)
             indexed_count = indexed_count + 1
+    DB_NOTES = batch_notes
+    DB_CHUNKS = batch_chunks
+    DB_LINKS = batch_links
+    DB_TASKS = batch_tasks
+    DB_NOTE_COUNT = batch_notes.len()
+    DB_CHUNK_COUNT = batch_chunks.len()
+    DB_LINK_COUNT = batch_links.len()
+    DB_TASK_COUNT = batch_tasks.len()
     indexed_count
 
 # --- Accessors ---

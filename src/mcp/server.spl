@@ -5,7 +5,7 @@
 use src.util.json_helpers.{js, jp, jo1, jo2, jo3, make_json_result, make_error, safe_substr, extract_field, extract_field_raw, extract_id, extract_nested, extract_arg, tool_text_result, LB, RB}
 use src.mcp.tools.{make_tools_list}
 use src.mcp.handlers.{handle_tool_call}
-use src.core.indexer.{IndexDb, open_index_db, open_index_memory, close_index_db, create_schema, reindex_vault}
+use src.core.indexer.{IndexDb, open_index_db, open_index_memory, close_index_db, create_schema}
 
 extern fn rt_env_get(name: text) -> text
 
@@ -74,9 +74,6 @@ fn start_server():
 
     var db = open_index_memory()
     create_schema(db)
-
-    if vault_path != "":
-        reindex_vault(db, vault_path)
 
     var running = true
     while running:
