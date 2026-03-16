@@ -1,0 +1,211 @@
+# MCP Handlers — per-tool handler dispatch
+#
+# Routes tool/call requests to the appropriate core module functions
+# and formats results as MCP tool responses.
+
+use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, LB, RB, SB_L, SB_R}
+use src.core.indexer.{IndexDb, query_all, query_value, row_get, reindex_vault, get_note_by_path}
+use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, search_tasks, search_decisions, read_note_content}
+use src.core.graph.{find_backlinks, find_forward_links, find_related, find_authoritative_docs, graph_walk, compute_authority, GraphNode}
+use src.core.ranker.{rank_results, explain_scores, ScoredResult, ScoreBreakdown}
+use src.util.query_parser.{parse_query, ParsedQuery}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# --- Format search results as JSON ---
+
+fn format_search_results(results: [SearchResult]) -> text:
+    var items: [text] = []
+    for r in results:
+        var pairs: [text] = []
+        pairs.push(jp("path", js(r.path)))
+        pairs.push(jp("title", js(r.title)))
+        if r.snippet != "":
+            pairs.push(jp("snippet", js(r.snippet)))
+        pairs.push(jp("score", jf(r.bm25_score)))
+        if r.tags != "":
+            pairs.push(jp("tags", js(r.tags)))
+        items.push(jo(pairs))
+    ja(items)
+
+fn format_scored_results(results: [ScoredResult]) -> text:
+    var items: [text] = []
+    for r in results:
+        var pairs: [text] = []
+        pairs.push(jp("path", js(r.result.path)))
+        pairs.push(jp("title", js(r.result.title)))
+        if r.result.snippet != "":
+            pairs.push(jp("snippet", js(r.result.snippet)))
+        pairs.push(jp("score", jf(r.final_score)))
+        if r.result.tags != "":
+            pairs.push(jp("tags", js(r.result.tags)))
+        items.push(jo(pairs))
+    ja(items)
+
+fn format_graph_nodes(nodes: [GraphNode]) -> text:
+    var items: [text] = []
+    for n in nodes:
+        var pairs: [text] = []
+        pairs.push(jp("path", js(n.path)))
+        pairs.push(jp("title", js(n.title)))
+        pairs.push(jp("depth", ji(n.depth)))
+        items.push(jo(pairs))
+    ja(items)
+
+fn format_breakdowns(breakdowns: [ScoreBreakdown]) -> text:
+    var items: [text] = []
+    for b in breakdowns:
+        var pairs: [text] = []
+        pairs.push(jp("path", js(b.path)))
+        pairs.push(jp("title", js(b.title)))
+        pairs.push(jp("bm25_score", jf(b.bm25_score)))
+        pairs.push(jp("graph_boost", jf(b.graph_boost)))
+        pairs.push(jp("authority_score", jf(b.authority_score)))
+        pairs.push(jp("recency_boost", jf(b.recency_boost)))
+        pairs.push(jp("final_score", jf(b.final_score)))
+        items.push(jo(pairs))
+    ja(items)
+
+# --- Main handler dispatch ---
+
+fn handle_tool_call(id: text, body: text, db: IndexDb, vault_path: text) -> text:
+    val tool_name = extract_nested(body, "name")
+
+    # Phase 1: Foundation
+
+    if tool_name == "search_vault":
+        val query_str = extract_arg(body, "query")
+        val limit_str = extract_arg(body, "limit")
+        var limit = int(limit_str) ?? 20
+        if limit <= 0:
+            limit = 20
+        if limit > 100:
+            limit = 100
+        val parsed = parse_query(query_str)
+        val results = rank_results(db, parsed, limit)
+        val json_results = format_scored_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "read_note":
+        val path = extract_arg(body, "path")
+        if path == "":
+            return make_error(id, -32602, "Missing required parameter: path")
+        # Try to read from filesystem first
+        var content = ""
+        if vault_path != "":
+            var full_path = vault_path
+            if not full_path.ends_with("/"):
+                full_path = full_path + "/"
+            full_path = full_path + path
+            content = rt_file_read_text(full_path)
+        # Fallback to indexed content
+        if content == "":
+            content = read_note_content(db, path)
+        val note_row = get_note_by_path(db, path)
+        var meta_json = jo1(jp("path", js(path)))
+        if note_row.values.len() > 0:
+            var meta_pairs: [text] = []
+            meta_pairs.push(jp("path", js(row_get(note_row, "path"))))
+            meta_pairs.push(jp("title", js(row_get(note_row, "title"))))
+            meta_pairs.push(jp("tags", js(row_get(note_row, "tags"))))
+            meta_pairs.push(jp("aliases", js(row_get(note_row, "aliases"))))
+            meta_json = jo(meta_pairs)
+        val output = jo2(jp("metadata", meta_json), jp("content", js(content)))
+        return tool_text_result(id, output)
+
+    elif tool_name == "search_by_tag":
+        val tag = extract_arg(body, "tag")
+        if tag == "":
+            return make_error(id, -32602, "Missing required parameter: tag")
+        val results = search_by_tag(db, tag)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "find_backlinks":
+        val note_path = extract_arg(body, "note_path")
+        if note_path == "":
+            return make_error(id, -32602, "Missing required parameter: note_path")
+        val results = find_backlinks(db, note_path)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    # Phase 2: Graph + Ranking
+
+    elif tool_name == "find_forward_links":
+        val note_path = extract_arg(body, "note_path")
+        if note_path == "":
+            return make_error(id, -32602, "Missing required parameter: note_path")
+        val results = find_forward_links(db, note_path)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "find_related":
+        val note_path = extract_arg(body, "note_path")
+        if note_path == "":
+            return make_error(id, -32602, "Missing required parameter: note_path")
+        val results = find_related(db, note_path)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "find_authoritative_docs":
+        val query_str = extract_arg(body, "query")
+        val limit_str = extract_arg(body, "limit")
+        var limit = int(limit_str) ?? 10
+        if limit <= 0:
+            limit = 10
+        val results = find_authoritative_docs(db, query_str, limit)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "graph_walk":
+        val seed = extract_arg(body, "seed")
+        val hops_str = extract_arg(body, "hops")
+        var hops = int(hops_str) ?? 2
+        if hops <= 0:
+            hops = 2
+        if hops > 5:
+            hops = 5
+        if seed == "":
+            return make_error(id, -32602, "Missing required parameter: seed")
+        val nodes = graph_walk(db, seed, hops)
+        val json_nodes = format_graph_nodes(nodes)
+        val output = jo2(jp("nodes", json_nodes), jp("count", ji(nodes.len())))
+        return tool_text_result(id, output)
+
+    # Phase 3: Specialized
+
+    elif tool_name == "search_tasks":
+        val query_str = extract_arg(body, "query")
+        val status = extract_arg(body, "status")
+        val results = search_tasks(db, query_str, status)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "search_decisions":
+        val query_str = extract_arg(body, "query")
+        val results = search_decisions(db, query_str)
+        val json_results = format_search_results(results)
+        val output = jo2(jp("results", json_results), jp("count", ji(results.len())))
+        return tool_text_result(id, output)
+
+    elif tool_name == "explain_search":
+        val query_str = extract_arg(body, "query")
+        val limit_str = extract_arg(body, "limit")
+        var limit = int(limit_str) ?? 5
+        if limit <= 0:
+            limit = 5
+        val parsed = parse_query(query_str)
+        val scored = rank_results(db, parsed, limit)
+        val breakdowns = explain_scores(scored)
+        val json_breakdowns = format_breakdowns(breakdowns)
+        val output = jo2(jp("breakdowns", json_breakdowns), jp("count", ji(breakdowns.len())))
+        return tool_text_result(id, output)
+
+    make_error(id, -32602, "Unknown tool: " + tool_name)

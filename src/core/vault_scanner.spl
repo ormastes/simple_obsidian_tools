@@ -1,0 +1,47 @@
+# Vault scanner — walks Obsidian vault directory, filters .md files
+#
+# Scans a vault directory recursively and returns all markdown file paths,
+# excluding configured patterns like .obsidian/, .trash/, node_modules/.
+
+extern fn rt_list_dir_recursive(path: text, ext: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
+# Default exclude patterns for Obsidian vaults
+val DEFAULT_EXCLUDES: [text] = [".obsidian/", ".trash/", "node_modules/", ".git/"]
+
+# --- Check if path should be excluded ---
+
+fn should_exclude(path: text, excludes: [text]) -> bool:
+    for pattern in excludes:
+        if path.contains(pattern):
+            return true
+    false
+
+# --- Scan vault for markdown files ---
+
+fn scan_vault(vault_path: text) -> [text]:
+    scan_vault_with_excludes(vault_path, DEFAULT_EXCLUDES)
+
+fn scan_vault_with_excludes(vault_path: text, excludes: [text]) -> [text]:
+    val all_files = rt_list_dir_recursive(vault_path, ".md")
+    var result: [text] = []
+    for file in all_files:
+        if not should_exclude(file, excludes):
+            result.push(file)
+    result
+
+# --- Get relative path from vault root ---
+
+fn relative_path(full_path: text, vault_path: text) -> text:
+    val vault_len = vault_path.len()
+    if full_path.starts_with(vault_path):
+        var rel = full_path.substring(vault_len, full_path.len())
+        if rel.starts_with("/"):
+            rel = rel.substring(1, rel.len())
+        return rel
+    full_path
+
+# --- Check if vault path is valid ---
+
+fn is_valid_vault(path: text) -> bool:
+    rt_file_exists(path)

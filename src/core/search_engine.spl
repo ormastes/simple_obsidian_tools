@@ -1,0 +1,240 @@
+# Search engine — FTS5 retrieval + operator filtering
+#
+# Executes full-text search queries against the indexed vault,
+# applies operator-based filters, and returns candidate results.
+
+use src.core.indexer.{IndexDb, DbRow, query_all, query_value, row_get, sql_escape}
+use src.util.query_parser.{ParsedQuery, parse_query, has_filters}
+use src.util.json_helpers.{safe_substr}
+
+# --- Search result ---
+
+struct SearchResult:
+    note_id: i64
+    path: text
+    title: text
+    snippet: text
+    bm25_score: f64
+    tags: text
+    mtime: i64
+
+# --- FTS5 search ---
+
+fn fts5_search_notes(db: IndexDb, query_text: text, limit: i64) -> [SearchResult]:
+    var results: [SearchResult] = []
+    if query_text.trim() == "":
+        return results
+
+    val esc_query = sql_escape(query_text)
+    val sql = "SELECT n.id, n.path, n.title, n.tags, n.mtime, bm25(note_fts) as score FROM note_fts JOIN notes n ON note_fts.rowid = n.id WHERE note_fts MATCH '{esc_query}' ORDER BY score LIMIT {limit}"
+    val rows = query_all(db, sql)
+
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: "",
+            bm25_score: float(row.values[5]) ?? 0.0,
+            tags: row.values[3],
+            mtime: int(row.values[4]) ?? 0
+        )
+        results.push(sr)
+    results
+
+fn fts5_search_chunks(db: IndexDb, query_text: text, limit: i64) -> [SearchResult]:
+    var results: [SearchResult] = []
+    if query_text.trim() == "":
+        return results
+
+    val esc_query = sql_escape(query_text)
+    val sql = "SELECT c.note_id, n.path, n.title, c.text_content, n.tags, n.mtime, bm25(chunk_fts) as score FROM chunk_fts JOIN chunks c ON chunk_fts.rowid = c.id JOIN notes n ON c.note_id = n.id WHERE chunk_fts MATCH '{esc_query}' ORDER BY score LIMIT {limit}"
+    val rows = query_all(db, sql)
+
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        val snippet_text = row.values[3]
+        # Truncate snippet to ~200 chars
+        var snip = snippet_text
+        if snip.len() > 200:
+            snip = safe_substr(snip, 0, 200) + "..."
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: snip,
+            bm25_score: float(row.values[6]) ?? 0.0,
+            tags: row.values[4],
+            mtime: int(row.values[5]) ?? 0
+        )
+        results.push(sr)
+    results
+
+# --- Combined search (notes + chunks, deduplicated by note_id) ---
+
+fn search_combined(db: IndexDb, query_text: text, limit: i64) -> [SearchResult]:
+    var note_results = fts5_search_notes(db, query_text, limit)
+    var chunk_results = fts5_search_chunks(db, query_text, limit)
+
+    # Merge: prefer chunk results for snippets, keep best score
+    var seen_ids: [i64] = []
+    var merged: [SearchResult] = []
+
+    for cr in chunk_results:
+        seen_ids.push(cr.note_id)
+        merged.push(cr)
+
+    for nr in note_results:
+        var found = false
+        for sid in seen_ids:
+            if sid == nr.note_id:
+                found = true
+                break
+        if not found:
+            seen_ids.push(nr.note_id)
+            merged.push(nr)
+
+    # Return up to limit
+    var final_results: [SearchResult] = []
+    var count = 0
+    for r in merged:
+        if count >= limit:
+            break
+        final_results.push(r)
+        count = count + 1
+    final_results
+
+# --- Fallback LIKE search (when FTS5 is not available) ---
+
+fn like_search(db: IndexDb, query_text: text, limit: i64) -> [SearchResult]:
+    var results: [SearchResult] = []
+    val esc = sql_escape(query_text)
+    val sql = "SELECT id, path, title, tags, mtime FROM notes WHERE title LIKE '%{esc}%' OR tags LIKE '%{esc}%' OR aliases LIKE '%{esc}%' LIMIT {limit}"
+    val rows = query_all(db, sql)
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: "",
+            bm25_score: 1.0,
+            tags: row.values[3],
+            mtime: int(row.values[4]) ?? 0
+        )
+        results.push(sr)
+    results
+
+# --- Search with auto-fallback ---
+
+fn search_vault_query(db: IndexDb, query_text: text, limit: i64) -> [SearchResult]:
+    # Try FTS5 first
+    var results = search_combined(db, query_text, limit)
+    if results.len() == 0:
+        # Fallback to LIKE
+        results = like_search(db, query_text, limit)
+    results
+
+# --- Operator filtering ---
+
+fn apply_tag_filter(db: IndexDb, results: [SearchResult], tag: text) -> [SearchResult]:
+    var filtered: [SearchResult] = []
+    for r in results:
+        if r.tags.contains(tag):
+            filtered.push(r)
+    filtered
+
+fn apply_path_filter(results: [SearchResult], path_prefix: text) -> [SearchResult]:
+    var filtered: [SearchResult] = []
+    for r in results:
+        if r.path.starts_with(path_prefix) or r.path.contains(path_prefix):
+            filtered.push(r)
+    filtered
+
+fn apply_title_filter(results: [SearchResult], title_substr: text) -> [SearchResult]:
+    var filtered: [SearchResult] = []
+    for r in results:
+        if r.title.contains(title_substr):
+            filtered.push(r)
+    filtered
+
+# --- Search by tag ---
+
+fn search_by_tag(db: IndexDb, tag: text) -> [SearchResult]:
+    var results: [SearchResult] = []
+    val esc = sql_escape(tag)
+    val sql = "SELECT id, path, title, tags, mtime FROM notes WHERE tags LIKE '%{esc}%'"
+    val rows = query_all(db, sql)
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: "",
+            bm25_score: 1.0,
+            tags: row.values[3],
+            mtime: int(row.values[4]) ?? 0
+        )
+        results.push(sr)
+    results
+
+# --- Search tasks ---
+
+fn search_tasks(db: IndexDb, query_text: text, status_filter: text) -> [SearchResult]:
+    var results: [SearchResult] = []
+    val esc = sql_escape(query_text)
+    var sql = "SELECT t.note_id, n.path, n.title, t.text_content, t.status, t.line_num FROM tasks t JOIN notes n ON t.note_id = n.id WHERE t.text_content LIKE '%{esc}%'"
+    if status_filter != "":
+        val esc_status = sql_escape(status_filter)
+        sql = sql + " AND t.status = '{esc_status}'"
+    val rows = query_all(db, sql)
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        val task_info = "[{row.values[4]}] {row.values[3]} (line {row.values[5]})"
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: task_info,
+            bm25_score: 1.0,
+            tags: "",
+            mtime: 0
+        )
+        results.push(sr)
+    results
+
+# --- Search decision-related chunks ---
+
+fn search_decisions(db: IndexDb, query_text: text) -> [SearchResult]:
+    var results: [SearchResult] = []
+    val esc = sql_escape(query_text)
+    val sql = "SELECT c.note_id, n.path, n.title, c.text_content, c.heading_path FROM chunks c JOIN notes n ON c.note_id = n.id WHERE (c.heading_path LIKE '%Decision%' OR c.heading_path LIKE '%decision%' OR c.heading_path LIKE '%ADR%' OR n.tags LIKE '%decision%' OR n.tags LIKE '%adr%') AND (c.text_content LIKE '%{esc}%' OR n.title LIKE '%{esc}%')"
+    val rows = query_all(db, sql)
+    for row in rows:
+        val nid = int(row.values[0]) ?? 0
+        var snip = row.values[3]
+        if snip.len() > 200:
+            snip = safe_substr(snip, 0, 200) + "..."
+        val sr = SearchResult(
+            note_id: nid,
+            path: row.values[1],
+            title: row.values[2],
+            snippet: "[{row.values[4]}] {snip}",
+            bm25_score: 1.0,
+            tags: "",
+            mtime: 0
+        )
+        results.push(sr)
+    results
+
+# --- Read full note content ---
+
+fn read_note_content(db: IndexDb, path: text) -> text:
+    val esc = sql_escape(path)
+    val rows = query_all(db, "SELECT text_content FROM chunks c JOIN notes n ON c.note_id = n.id WHERE n.path = '{esc}' ORDER BY c.id")
+    var parts: [text] = []
+    for row in rows:
+        parts.push(row.values[0])
+    parts.join("\n")

@@ -1,0 +1,107 @@
+# Unit tests for indexer module
+
+use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, remove_note, is_stale, query_all, query_value, note_count, get_note_by_path, row_get}
+
+describe "Indexer":
+    """Tests for SQLite indexing and CRUD operations"""
+
+    context "schema creation":
+        """Creating the database schema"""
+
+        it "creates schema successfully":
+            val db = open_index_memory()
+            val ok = create_schema(db)
+            expect(ok).to_equal(true)
+            close_index_db(db)
+
+        it "creates notes table":
+            val db = open_index_memory()
+            create_schema(db)
+            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='notes'")
+            expect(count).to_equal("1")
+            close_index_db(db)
+
+        it "creates chunks table":
+            val db = open_index_memory()
+            create_schema(db)
+            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'")
+            expect(count).to_equal("1")
+            close_index_db(db)
+
+        it "creates links table":
+            val db = open_index_memory()
+            create_schema(db)
+            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='links'")
+            expect(count).to_equal("1")
+            close_index_db(db)
+
+        it "creates tasks table":
+            val db = open_index_memory()
+            create_schema(db)
+            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
+            expect(count).to_equal("1")
+            close_index_db(db)
+
+    context "indexing notes":
+        """Inserting and querying note data"""
+
+        it "indexes a note with frontmatter":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "---\ntitle: Test Note\ntags: [test, unit]\n---\n\n# Test Note\n\nSome content."
+            val note_id = index_note(db, "/vault/test.md", "test.md", content, 1000)
+            expect(note_id).to_be_greater_than(0)
+            val count = note_count(db)
+            expect(count).to_equal(1)
+            close_index_db(db)
+
+        it "indexes wikilinks":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "# Test\n\nSee [[other-note]] and [[another]]."
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            val link_count = query_value(db, "SELECT COUNT(*) FROM links")
+            expect(link_count).to_equal("2")
+            close_index_db(db)
+
+        it "indexes tasks":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "# Tasks\n\n- [ ] Open task\n- [x] Done task"
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            val task_count = query_value(db, "SELECT COUNT(*) FROM tasks")
+            expect(task_count).to_equal("2")
+            close_index_db(db)
+
+    context "removing notes":
+        """Deleting notes and cascading"""
+
+        it "removes a note and its dependents":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "# Test\n\n[[link]] and - [ ] task"
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            expect(note_count(db)).to_equal(1)
+            remove_note(db, "test.md")
+            expect(note_count(db)).to_equal(0)
+            val link_count = query_value(db, "SELECT COUNT(*) FROM links")
+            expect(link_count).to_equal("0")
+            close_index_db(db)
+
+    context "staleness check":
+        """Checking if re-index is needed"""
+
+        it "detects stale notes":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "# Test"
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            expect(is_stale(db, "test.md", 2000)).to_equal(true)
+            expect(is_stale(db, "test.md", 1000)).to_equal(false)
+            close_index_db(db)
+
+        it "treats missing notes as stale":
+            val db = open_index_memory()
+            create_schema(db)
+            expect(is_stale(db, "nonexistent.md", 1000)).to_equal(true)
+            close_index_db(db)

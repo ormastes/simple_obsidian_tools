@@ -1,0 +1,140 @@
+# Ranker — multi-stage ranking pipeline
+#
+# 6-stage pipeline:
+# 1. Lexical retrieval (FTS5 BM25)
+# 2. Operator filtering
+# 3. Graph reranking
+# 4. Authority score
+# 5. Recency boost
+# 6. Semantic rerank (deferred)
+
+use src.core.indexer.{IndexDb, query_value, sql_escape}
+use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, apply_tag_filter, apply_path_filter, apply_title_filter}
+use src.core.graph.{compute_authority}
+use src.util.query_parser.{ParsedQuery, has_filters}
+
+extern fn rt_time_unix() -> i64
+
+# --- Score breakdown for explain_search ---
+
+struct ScoreBreakdown:
+    path: text
+    title: text
+    bm25_score: f64
+    operator_boost: f64
+    graph_boost: f64
+    authority_score: f64
+    recency_boost: f64
+    final_score: f64
+
+# --- Scored result ---
+
+struct ScoredResult:
+    result: SearchResult
+    final_score: f64
+    breakdown: ScoreBreakdown
+
+# --- Recency boost (exponential decay over 90 days) ---
+
+fn compute_recency_boost(mtime: i64) -> f64:
+    val now = rt_time_unix()
+    val age_seconds = now - mtime
+    val age_days = float(age_seconds) / 86400.0
+    val decay_days = 90.0
+    if age_days <= 0.0:
+        return 1.0
+    if age_days >= decay_days:
+        return 0.0
+    # Linear decay (approximation of exponential)
+    val boost = 1.0 - (age_days / decay_days)
+    if boost < 0.0:
+        return 0.0
+    boost
+
+# --- Main ranking pipeline ---
+
+fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
+    # Stage 1: Lexical retrieval
+    var candidates = search_vault_query(db, query.freetext, limit * 3)
+
+    # If no freetext but has tag filters, start from tag search
+    if query.freetext == "" and query.tag_filters.len() > 0:
+        candidates = search_by_tag(db, query.tag_filters[0])
+
+    # Stage 2: Operator filtering
+    for tag in query.tag_filters:
+        candidates = apply_tag_filter(db, candidates, tag)
+    for path_filter in query.path_filters:
+        candidates = apply_path_filter(candidates, path_filter)
+    for title_filter in query.title_filters:
+        candidates = apply_title_filter(candidates, title_filter)
+
+    # Stages 3-5: Score each candidate
+    var scored: [ScoredResult] = []
+    for candidate in candidates:
+        # Stage 3: Graph reranking — count backlinks
+        val backlink_count_str = query_value(db, "SELECT COUNT(*) FROM links WHERE dst_path LIKE '%{sql_escape(candidate.path)}%'")
+        val backlink_count = int(backlink_count_str) ?? 0
+        val graph_boost = float(backlink_count) * 0.5
+
+        # Stage 4: Authority score
+        val authority = compute_authority(db, candidate.path)
+        val authority_boost = authority * 0.3
+
+        # Stage 5: Recency boost
+        var recency = 0.0
+        if candidate.mtime > 0:
+            recency = compute_recency_boost(candidate.mtime) * 2.0
+
+        # Combine scores
+        val bm25 = candidate.bm25_score
+        # BM25 scores from FTS5 are negative (more negative = worse match)
+        # Normalize: negate so higher = better
+        val normalized_bm25 = 0.0 - bm25
+        val final_score = normalized_bm25 + graph_boost + authority_boost + recency
+
+        val breakdown = ScoreBreakdown(
+            path: candidate.path,
+            title: candidate.title,
+            bm25_score: normalized_bm25,
+            operator_boost: 0.0,
+            graph_boost: graph_boost,
+            authority_score: authority_boost,
+            recency_boost: recency,
+            final_score: final_score
+        )
+
+        scored.push(ScoredResult(
+            result: candidate,
+            final_score: final_score,
+            breakdown: breakdown
+        ))
+
+    # Sort by final_score descending (selection sort)
+    for i in 0..scored.len():
+        var max_idx = i
+        for j in (i + 1)..scored.len():
+            if scored[j].final_score > scored[max_idx].final_score:
+                max_idx = j
+        if max_idx != i:
+            val tmp = scored[i]
+            scored[i] = scored[max_idx]
+            scored[max_idx] = tmp
+
+    # Return top N
+    var final_results: [ScoredResult] = []
+    var count = 0
+    for s in scored:
+        if count >= limit:
+            break
+        final_results.push(s)
+        count = count + 1
+    final_results
+
+# --- Explain scores ---
+
+fn explain_scores(results: [ScoredResult]) -> [ScoreBreakdown]:
+    var breakdowns: [ScoreBreakdown] = []
+    for r in results:
+        breakdowns.push(r.breakdown)
+    breakdowns
