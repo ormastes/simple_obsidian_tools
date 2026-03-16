@@ -4,7 +4,7 @@ use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema,
 use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, search_tasks, search_decisions, like_search, apply_tag_filter, apply_path_filter}
 
 describe "SearchEngine":
-    """Tests for FTS5 search and filtering"""
+    """Tests for text search and filtering"""
 
     context "search by tag":
         """Tag-based search"""
@@ -27,16 +27,27 @@ describe "SearchEngine":
             expect(results.len()).to_equal(0)
             close_index_db(db)
 
-    context "LIKE fallback search":
-        """Fallback search when FTS5 is unavailable"""
+    context "text search":
+        """Full-text search with scoring"""
 
         it "finds notes by title":
             val db = open_index_memory()
             create_schema(db)
             index_note(db, "/v/a.md", "a.md", "# Alpha Project\n\nDetails here", 1000)
             index_note(db, "/v/b.md", "b.md", "# Beta Notes\n\nOther details", 1000)
-            val results = like_search(db, "Alpha", 10)
+            val results = search_vault_query(db, "Alpha", 10)
             expect(results.len()).to_equal(1)
+            close_index_db(db)
+
+        it "ranks title matches higher":
+            val db = open_index_memory()
+            create_schema(db)
+            index_note(db, "/v/a.md", "a.md", "# Search Engine\n\nAbout searching.", 1000)
+            index_note(db, "/v/b.md", "b.md", "# Notes\n\nSome search mention.", 1000)
+            val results = search_vault_query(db, "Search", 10)
+            expect(results.len()).to_equal(2)
+            # Title match should rank first
+            expect(results[0].path).to_equal("a.md")
             close_index_db(db)
 
     context "task search":

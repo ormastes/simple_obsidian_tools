@@ -1,19 +1,19 @@
 # Ranker — multi-stage ranking pipeline
 #
 # 6-stage pipeline:
-# 1. Lexical retrieval (FTS5 BM25)
+# 1. Lexical retrieval (text matching)
 # 2. Operator filtering
 # 3. Graph reranking
 # 4. Authority score
 # 5. Recency boost
 # 6. Semantic rerank (deferred)
 
-use src.core.indexer.{IndexDb, query_value, sql_escape}
+use src.core.indexer.{IndexDb, count_inbound_links, all_links}
 use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, apply_tag_filter, apply_path_filter, apply_title_filter}
-use src.core.graph.{compute_authority}
+use src.core.graph.{compute_authority, note_name_from_path}
 use src.util.query_parser.{ParsedQuery, has_filters}
 
-extern fn rt_time_unix() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 # --- Score breakdown for explain_search ---
 
@@ -34,18 +34,18 @@ struct ScoredResult:
     final_score: f64
     breakdown: ScoreBreakdown
 
-# --- Recency boost (exponential decay over 90 days) ---
+# --- Recency boost (linear decay over 90 days) ---
 
 fn compute_recency_boost(mtime: i64) -> f64:
-    val now = rt_time_unix()
-    val age_seconds = now - mtime
+    val now_micros = rt_time_now_unix_micros()
+    val now_secs = now_micros / 1000000
+    val age_seconds = now_secs - mtime
     val age_days = float(age_seconds) / 86400.0
     val decay_days = 90.0
     if age_days <= 0.0:
         return 1.0
     if age_days >= decay_days:
         return 0.0
-    # Linear decay (approximation of exponential)
     val boost = 1.0 - (age_days / decay_days)
     if boost < 0.0:
         return 0.0
@@ -71,10 +71,14 @@ fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
 
     # Stages 3-5: Score each candidate
     var scored: [ScoredResult] = []
+    val db_links = all_links(db)
     for candidate in candidates:
         # Stage 3: Graph reranking — count backlinks
-        val backlink_count_str = query_value(db, "SELECT COUNT(*) FROM links WHERE dst_path LIKE '%{sql_escape(candidate.path)}%'")
-        val backlink_count = int(backlink_count_str) ?? 0
+        val candidate_name = note_name_from_path(candidate.path)
+        var backlink_count: i64 = 0
+        for link in db_links:
+            if link.dst_path == candidate_name or link.dst_path == candidate.path:
+                backlink_count = backlink_count + 1
         val graph_boost = float(backlink_count) * 0.5
 
         # Stage 4: Authority score
@@ -88,15 +92,12 @@ fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
 
         # Combine scores
         val bm25 = candidate.bm25_score
-        # BM25 scores from FTS5 are negative (more negative = worse match)
-        # Normalize: negate so higher = better
-        val normalized_bm25 = 0.0 - bm25
-        val final_score = normalized_bm25 + graph_boost + authority_boost + recency
+        val final_score = bm25 + graph_boost + authority_boost + recency
 
         val breakdown = ScoreBreakdown(
             path: candidate.path,
             title: candidate.title,
-            bm25_score: normalized_bm25,
+            bm25_score: bm25,
             operator_boost: 0.0,
             graph_boost: graph_boost,
             authority_score: authority_boost,

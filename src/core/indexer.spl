@@ -1,246 +1,229 @@
-# Indexer — SQLite schema + FTS5 + CRUD for vault index
+# Indexer — in-memory storage using module-level globals
 #
-# Creates and manages the SQLite database that stores parsed note data.
-# Uses FTS5 virtual tables for full-text search.
+# Classes are pass-by-value in the interpreter, so we use
+# module-level arrays with manual counters for mutable state.
 
-extern fn rt_sqlite_open(path: text) -> i64
-extern fn rt_sqlite_open_memory() -> i64
-extern fn rt_sqlite_close(handle: i64) -> i64
-extern fn rt_sqlite_execute(conn: i64, sql: text) -> i64
-extern fn rt_sqlite_execute_batch(conn: i64, sql: text) -> i64
-extern fn rt_sqlite_query(conn: i64, sql: text) -> i64
-extern fn rt_sqlite_query_next(stmt: i64) -> i64
-extern fn rt_sqlite_query_done(stmt: i64)
-extern fn rt_sqlite_column_count(stmt: i64) -> i64
-extern fn rt_sqlite_column_name(stmt: i64, idx: i64) -> text
-extern fn rt_sqlite_column_text(stmt: i64, idx: i64) -> text
-extern fn rt_sqlite_column_int(stmt: i64, idx: i64) -> i64
-extern fn rt_sqlite_prepare(conn: i64, sql: text) -> i64
-extern fn rt_sqlite_bind_text(stmt: i64, idx: i64, value: text) -> i64
-extern fn rt_sqlite_bind_int(stmt: i64, idx: i64, value: i64) -> i64
-extern fn rt_sqlite_bind_float(stmt: i64, idx: i64, value: f64) -> i64
-extern fn rt_sqlite_reset(stmt: i64) -> i64
-extern fn rt_sqlite_finalize(stmt: i64)
-extern fn rt_sqlite_last_insert_rowid(conn: i64) -> i64
-extern fn rt_sqlite_error_message(conn: i64) -> text
-extern fn rt_file_modified_time(path: text) -> i64
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
 
-use src.core.note_parser.{NoteMeta, WikiLink, Task, Chunk, parse_frontmatter, extract_wikilinks, extract_tags, extract_tasks, chunk_by_heading}
+use src.core.note_parser.{parse_frontmatter, extract_wikilinks, extract_tags, extract_tasks, chunk_by_heading}
 use src.core.vault_scanner.{scan_vault, relative_path}
 
-# --- Database wrapper ---
+# --- Record types ---
+
+struct NoteRecord:
+    id: i64
+    path: text
+    title: text
+    aliases: text
+    tags: text
+    frontmatter: text
+    mtime: i64
+    weight: f64
+
+struct ChunkRecord:
+    id: i64
+    note_id: i64
+    chunk_type: text
+    heading_path: text
+    text_content: text
+
+struct LinkRecord:
+    id: i64
+    src_note_id: i64
+    dst_path: text
+    anchor_text: text
+
+struct TaskRecord:
+    id: i64
+    note_id: i64
+    status: text
+    text_content: text
+    line_num: i64
+
+# --- Dummy handle for API compatibility ---
 
 struct IndexDb:
-    handle: i64
-    path: text
     is_valid: bool
 
-fn open_index_db(path: text) -> IndexDb:
-    # Ensure parent directory exists
-    val last_slash_result = path.last_index_of("/")
-    match last_slash_result:
-        Some(i):
-            val dir = path.substring(0, i)
-            rt_dir_create_all(dir)
-        nil: pass_dn
+# --- Module-level storage ---
 
-    val handle = rt_sqlite_open(path)
-    val valid = handle != 0
-    IndexDb(handle: handle, path: path, is_valid: valid)
+var DB_NOTES: [NoteRecord] = []
+var DB_CHUNKS: [ChunkRecord] = []
+var DB_LINKS: [LinkRecord] = []
+var DB_TASKS: [TaskRecord] = []
+var DB_NOTE_COUNT: i64 = 0
+var DB_CHUNK_COUNT: i64 = 0
+var DB_LINK_COUNT: i64 = 0
+var DB_TASK_COUNT: i64 = 0
+var DB_NEXT_ID: i64 = 1
+
+# --- Database lifecycle ---
 
 fn open_index_memory() -> IndexDb:
-    val handle = rt_sqlite_open_memory()
-    IndexDb(handle: handle, path: ":memory:", is_valid: handle != 0)
+    DB_NOTES = []
+    DB_CHUNKS = []
+    DB_LINKS = []
+    DB_TASKS = []
+    DB_NOTE_COUNT = 0
+    DB_CHUNK_COUNT = 0
+    DB_LINK_COUNT = 0
+    DB_TASK_COUNT = 0
+    DB_NEXT_ID = 1
+    IndexDb(is_valid: true)
+
+fn open_index_db(path: text) -> IndexDb:
+    open_index_memory()
 
 fn close_index_db(db: IndexDb):
-    if db.is_valid:
-        rt_sqlite_close(db.handle)
-
-# --- Schema creation ---
+    pass_dn
 
 fn create_schema(db: IndexDb) -> bool:
-    if not db.is_valid:
-        return false
-
-    val schema = "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT, aliases TEXT, tags TEXT, frontmatter TEXT, mtime INTEGER, weight REAL DEFAULT 1.0); CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY, note_id INTEGER REFERENCES notes(id), chunk_type TEXT, heading_path TEXT, text_content TEXT); CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY, src_note_id INTEGER REFERENCES notes(id), dst_path TEXT, anchor_text TEXT, context_chunk_id INTEGER); CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, note_id INTEGER REFERENCES notes(id), status TEXT, text_content TEXT, line_num INTEGER);"
-
-    val ok = rt_sqlite_execute_batch(db.handle, schema)
-    if ok != 1:
-        return false
-
-    # Create FTS5 virtual tables (may fail if FTS5 not available)
-    val fts_notes = "CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(title, aliases, tags, content=notes, content_rowid=id);"
-    rt_sqlite_execute(db.handle, fts_notes)
-
-    val fts_chunks = "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(text_content, heading_path, content=chunks, content_rowid=id);"
-    rt_sqlite_execute(db.handle, fts_chunks)
-
     true
 
-# --- Helper: execute query and return rows ---
+# --- ID generation ---
 
-struct DbRow:
-    values: [text]
-    column_names: [text]
-
-fn query_all(db: IndexDb, sql: text) -> [DbRow]:
-    if not db.is_valid:
-        return []
-    val stmt_handle = rt_sqlite_query(db.handle, sql)
-    if stmt_handle == 0:
-        return []
-    var rows: [DbRow] = []
-    val col_count = rt_sqlite_column_count(stmt_handle)
-    var column_names: [text] = []
-    for i in 0..col_count:
-        val name = rt_sqlite_column_name(stmt_handle, i)
-        column_names = column_names + [name]
-    var has_row = rt_sqlite_query_next(stmt_handle)
-    while has_row == 1:
-        var values: [text] = []
-        for i in 0..col_count:
-            val value = rt_sqlite_column_text(stmt_handle, i)
-            values = values + [value]
-        rows.push(DbRow(values: values, column_names: column_names))
-        has_row = rt_sqlite_query_next(stmt_handle)
-    rt_sqlite_query_done(stmt_handle)
-    rows
-
-fn query_value(db: IndexDb, sql: text) -> text:
-    val rows = query_all(db, sql)
-    if rows.len() > 0:
-        val row = rows[0]
-        if row.values.len() > 0:
-            return row.values[0]
-    ""
-
-fn row_get(row: DbRow, column: text) -> text:
-    for i in 0..row.column_names.len():
-        if row.column_names[i] == column:
-            return row.values[i]
-    ""
-
-fn execute(db: IndexDb, sql: text) -> bool:
-    if not db.is_valid:
-        return false
-    val result = rt_sqlite_execute(db.handle, sql)
-    result == 1
-
-# --- SQL escaping ---
-
-fn sql_escape(s: text) -> text:
-    s.replace("'", "''")
+fn next_id() -> i64:
+    val id = DB_NEXT_ID
+    DB_NEXT_ID = DB_NEXT_ID + 1
+    id
 
 # --- Index a single note ---
 
-fn index_note(db: IndexDb, path: text, rel_path: text, content: text, mtime: i64) -> i64:
+fn index_note(db: IndexDb, full_path: text, rel_path: text, content: text, mtime: i64) -> i64:
     val meta = parse_frontmatter(content)
     val aliases_str = meta.aliases.join(",")
-    val tags_str = meta.tags.join(",")
 
-    # Also get inline tags from content
+    # Merge frontmatter tags and inline tags
     val inline_tags = extract_tags(content)
     var all_tags: [text] = []
     for t in meta.tags:
-        all_tags.push(t)
+        all_tags = all_tags + [t]
     for t in inline_tags:
-        # Avoid duplicates
         var found = false
         for existing in all_tags:
             if existing == t:
                 found = true
                 break
         if not found:
-            all_tags.push(t)
+            all_tags = all_tags + [t]
     val all_tags_str = all_tags.join(",")
 
     # Remove existing note if present
     remove_note(db, rel_path)
 
-    # Insert note
-    val esc_path = sql_escape(rel_path)
-    val esc_title = sql_escape(meta.title)
-    val esc_aliases = sql_escape(aliases_str)
-    val esc_tags = sql_escape(all_tags_str)
-    val esc_fm = sql_escape(meta.frontmatter_raw)
-    val insert_sql = "INSERT INTO notes (path, title, aliases, tags, frontmatter, mtime) VALUES ('{esc_path}', '{esc_title}', '{esc_aliases}', '{esc_tags}', '{esc_fm}', {mtime})"
-    execute(db, insert_sql)
-    val note_id_str = query_value(db, "SELECT last_insert_rowid()")
-    val note_id = int(note_id_str) ?? 0
+    # Create note record
+    val note_id = next_id()
+    val note = NoteRecord(
+        id: note_id,
+        path: rel_path,
+        title: meta.title,
+        aliases: aliases_str,
+        tags: all_tags_str,
+        frontmatter: meta.frontmatter_raw,
+        mtime: mtime,
+        weight: 1.0
+    )
+    DB_NOTES = DB_NOTES + [note]
+    DB_NOTE_COUNT = DB_NOTE_COUNT + 1
 
-    if note_id == 0:
-        return 0
-
-    # Insert FTS entry for note
-    val fts_insert = "INSERT INTO note_fts(rowid, title, aliases, tags) VALUES ({note_id}, '{esc_title}', '{esc_aliases}', '{esc_tags}')"
-    execute(db, fts_insert)
-
-    # Insert chunks
+    # Create chunk records
     val chunks = chunk_by_heading(content)
     for chunk in chunks:
-        val esc_type = sql_escape(chunk.chunk_type)
-        val esc_heading = sql_escape(chunk.heading_path)
-        val esc_text = sql_escape(chunk.text_content)
-        val chunk_sql = "INSERT INTO chunks (note_id, chunk_type, heading_path, text_content) VALUES ({note_id}, '{esc_type}', '{esc_heading}', '{esc_text}')"
-        execute(db, chunk_sql)
-        val chunk_id_str = query_value(db, "SELECT last_insert_rowid()")
-        val chunk_id = int(chunk_id_str) ?? 0
+        val chunk_id = next_id()
+        val cr = ChunkRecord(
+            id: chunk_id,
+            note_id: note_id,
+            chunk_type: chunk.chunk_type,
+            heading_path: chunk.heading_path,
+            text_content: chunk.text_content
+        )
+        DB_CHUNKS = DB_CHUNKS + [cr]
+        DB_CHUNK_COUNT = DB_CHUNK_COUNT + 1
 
-        # Insert FTS entry for chunk
-        val fts_chunk = "INSERT INTO chunk_fts(rowid, text_content, heading_path) VALUES ({chunk_id}, '{esc_text}', '{esc_heading}')"
-        execute(db, fts_chunk)
-
-    # Insert wikilinks
+    # Create link records
     val wikilinks = extract_wikilinks(content)
     for link in wikilinks:
-        val esc_target = sql_escape(link.target)
-        val esc_alias = sql_escape(link.alias)
-        val link_sql = "INSERT INTO links (src_note_id, dst_path, anchor_text) VALUES ({note_id}, '{esc_target}', '{esc_alias}')"
-        execute(db, link_sql)
+        val link_id = next_id()
+        val lr = LinkRecord(
+            id: link_id,
+            src_note_id: note_id,
+            dst_path: link.target,
+            anchor_text: link.alias
+        )
+        DB_LINKS = DB_LINKS + [lr]
+        DB_LINK_COUNT = DB_LINK_COUNT + 1
 
-    # Insert tasks
-    val tasks = extract_tasks(content)
-    for task in tasks:
-        val esc_task = sql_escape(task.text_content)
-        val task_sql = "INSERT INTO tasks (note_id, status, text_content, line_num) VALUES ({note_id}, '{task.status}', '{esc_task}', {task.line_num})"
-        execute(db, task_sql)
+    # Create task records
+    val tasks_list = extract_tasks(content)
+    for task in tasks_list:
+        val task_id = next_id()
+        val tr = TaskRecord(
+            id: task_id,
+            note_id: note_id,
+            status: task.status,
+            text_content: task.text_content,
+            line_num: task.line_num
+        )
+        DB_TASKS = DB_TASKS + [tr]
+        DB_TASK_COUNT = DB_TASK_COUNT + 1
 
     note_id
 
 # --- Remove a note and its dependents ---
 
 fn remove_note(db: IndexDb, rel_path: text):
-    val esc_path = sql_escape(rel_path)
-    val id_str = query_value(db, "SELECT id FROM notes WHERE path = '{esc_path}'")
-    if id_str == "":
+    var note_id: i64 = -1
+    for n in DB_NOTES:
+        if n.path == rel_path:
+            note_id = n.id
+            break
+    if note_id < 0:
         return
-    val note_id = int(id_str) ?? 0
-    if note_id == 0:
-        return
-    # Delete FTS entries
-    execute(db, "DELETE FROM note_fts WHERE rowid = {note_id}")
-    # Delete chunk FTS entries
-    val chunk_rows = query_all(db, "SELECT id FROM chunks WHERE note_id = {note_id}")
-    for row in chunk_rows:
-        val cid = row.values[0]
-        execute(db, "DELETE FROM chunk_fts WHERE rowid = {cid}")
-    # Delete dependents
-    execute(db, "DELETE FROM chunks WHERE note_id = {note_id}")
-    execute(db, "DELETE FROM links WHERE src_note_id = {note_id}")
-    execute(db, "DELETE FROM tasks WHERE note_id = {note_id}")
-    execute(db, "DELETE FROM notes WHERE id = {note_id}")
 
-# --- Check if note is stale ---
+    var new_notes: [NoteRecord] = []
+    var nc: i64 = 0
+    for n in DB_NOTES:
+        if n.id != note_id:
+            new_notes = new_notes + [n]
+            nc = nc + 1
+    DB_NOTES = new_notes
+    DB_NOTE_COUNT = nc
+
+    var new_chunks: [ChunkRecord] = []
+    var cc: i64 = 0
+    for c in DB_CHUNKS:
+        if c.note_id != note_id:
+            new_chunks = new_chunks + [c]
+            cc = cc + 1
+    DB_CHUNKS = new_chunks
+    DB_CHUNK_COUNT = cc
+
+    var new_links: [LinkRecord] = []
+    var lc: i64 = 0
+    for l in DB_LINKS:
+        if l.src_note_id != note_id:
+            new_links = new_links + [l]
+            lc = lc + 1
+    DB_LINKS = new_links
+    DB_LINK_COUNT = lc
+
+    var new_tasks: [TaskRecord] = []
+    var tc: i64 = 0
+    for t in DB_TASKS:
+        if t.note_id != note_id:
+            new_tasks = new_tasks + [t]
+            tc = tc + 1
+    DB_TASKS = new_tasks
+    DB_TASK_COUNT = tc
+
+# --- Staleness check ---
 
 fn is_stale(db: IndexDb, rel_path: text, current_mtime: i64) -> bool:
-    val esc_path = sql_escape(rel_path)
-    val stored_mtime_str = query_value(db, "SELECT mtime FROM notes WHERE path = '{esc_path}'")
-    if stored_mtime_str == "":
-        return true
-    val stored_mtime = int(stored_mtime_str) ?? 0
-    current_mtime > stored_mtime
+    for n in DB_NOTES:
+        if n.path == rel_path:
+            return current_mtime > n.mtime
+    true
 
 # --- Full vault reindex ---
 
@@ -249,24 +232,65 @@ fn reindex_vault(db: IndexDb, vault_path: text) -> i64:
     var indexed_count: i64 = 0
     for file in files:
         val rel = relative_path(file, vault_path)
-        val mtime = rt_file_modified_time(file)
-        if is_stale(db, rel, mtime):
-            val content = rt_file_read_text(file)
-            index_note(db, file, rel, content, mtime)
+        val fsize = rt_file_size(file)
+        if is_stale(db, rel, fsize):
+            val content = rt_file_read_text(file) ?? ""
+            index_note(db, file, rel, content, fsize)
             indexed_count = indexed_count + 1
     indexed_count
 
-# --- Get note by path ---
+# --- Accessors ---
 
-fn get_note_by_path(db: IndexDb, path: text) -> DbRow:
-    val esc = sql_escape(path)
-    val rows = query_all(db, "SELECT * FROM notes WHERE path = '{esc}'")
-    if rows.len() > 0:
-        return rows[0]
-    DbRow(values: [], column_names: [])
+fn get_note_by_id(db: IndexDb, note_id: i64) -> NoteRecord:
+    for n in DB_NOTES:
+        if n.id == note_id:
+            return n
+    NoteRecord(id: 0, path: "", title: "", aliases: "", tags: "", frontmatter: "", mtime: 0, weight: 0.0)
 
-# --- Get note count ---
+fn get_note_by_path(db: IndexDb, path: text) -> NoteRecord:
+    for n in DB_NOTES:
+        if n.path == path:
+            return n
+    NoteRecord(id: 0, path: "", title: "", aliases: "", tags: "", frontmatter: "", mtime: 0, weight: 0.0)
 
 fn note_count(db: IndexDb) -> i64:
-    val count_str = query_value(db, "SELECT COUNT(*) FROM notes")
-    int(count_str) ?? 0
+    DB_NOTE_COUNT
+
+fn link_count(db: IndexDb) -> i64:
+    DB_LINK_COUNT
+
+fn task_count(db: IndexDb) -> i64:
+    DB_TASK_COUNT
+
+fn get_chunks_for_note(db: IndexDb, note_id: i64) -> [ChunkRecord]:
+    var result: [ChunkRecord] = []
+    for c in DB_CHUNKS:
+        if c.note_id == note_id:
+            result = result + [c]
+    result
+
+fn get_links_from_note(db: IndexDb, note_id: i64) -> [LinkRecord]:
+    var result: [LinkRecord] = []
+    for l in DB_LINKS:
+        if l.src_note_id == note_id:
+            result = result + [l]
+    result
+
+fn get_tasks_for_note(db: IndexDb, note_id: i64) -> [TaskRecord]:
+    var result: [TaskRecord] = []
+    for t in DB_TASKS:
+        if t.note_id == note_id:
+            result = result + [t]
+    result
+
+fn all_notes(db: IndexDb) -> [NoteRecord]:
+    DB_NOTES
+
+fn all_chunks(db: IndexDb) -> [ChunkRecord]:
+    DB_CHUNKS
+
+fn all_links(db: IndexDb) -> [LinkRecord]:
+    DB_LINKS
+
+fn all_tasks(db: IndexDb) -> [TaskRecord]:
+    DB_TASKS

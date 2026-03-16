@@ -1,12 +1,12 @@
 # Unit tests for indexer module
 
-use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, remove_note, is_stale, query_all, query_value, note_count, get_note_by_path, row_get}
+use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, remove_note, is_stale, note_count, link_count, task_count, get_note_by_path}
 
 describe "Indexer":
-    """Tests for SQLite indexing and CRUD operations"""
+    """Tests for in-memory indexing and CRUD operations"""
 
     context "schema creation":
-        """Creating the database schema"""
+        """Creating the in-memory database"""
 
         it "creates schema successfully":
             val db = open_index_memory()
@@ -14,32 +14,10 @@ describe "Indexer":
             expect(ok).to_equal(true)
             close_index_db(db)
 
-        it "creates notes table":
+        it "starts with zero notes":
             val db = open_index_memory()
             create_schema(db)
-            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='notes'")
-            expect(count).to_equal("1")
-            close_index_db(db)
-
-        it "creates chunks table":
-            val db = open_index_memory()
-            create_schema(db)
-            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'")
-            expect(count).to_equal("1")
-            close_index_db(db)
-
-        it "creates links table":
-            val db = open_index_memory()
-            create_schema(db)
-            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='links'")
-            expect(count).to_equal("1")
-            close_index_db(db)
-
-        it "creates tasks table":
-            val db = open_index_memory()
-            create_schema(db)
-            val count = query_value(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
-            expect(count).to_equal("1")
+            expect(note_count(db)).to_equal(0)
             close_index_db(db)
 
     context "indexing notes":
@@ -51,8 +29,16 @@ describe "Indexer":
             val content = "---\ntitle: Test Note\ntags: [test, unit]\n---\n\n# Test Note\n\nSome content."
             val note_id = index_note(db, "/vault/test.md", "test.md", content, 1000)
             expect(note_id).to_be_greater_than(0)
-            val count = note_count(db)
-            expect(count).to_equal(1)
+            expect(note_count(db)).to_equal(1)
+            close_index_db(db)
+
+        it "stores note title":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "---\ntitle: My Title\n---\n\n# My Title"
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            val note = get_note_by_path(db, "test.md")
+            expect(note.title).to_equal("My Title")
             close_index_db(db)
 
         it "indexes wikilinks":
@@ -60,8 +46,7 @@ describe "Indexer":
             create_schema(db)
             val content = "# Test\n\nSee [[other-note]] and [[another]]."
             index_note(db, "/vault/test.md", "test.md", content, 1000)
-            val link_count = query_value(db, "SELECT COUNT(*) FROM links")
-            expect(link_count).to_equal("2")
+            expect(link_count(db)).to_equal(2)
             close_index_db(db)
 
         it "indexes tasks":
@@ -69,8 +54,17 @@ describe "Indexer":
             create_schema(db)
             val content = "# Tasks\n\n- [ ] Open task\n- [x] Done task"
             index_note(db, "/vault/test.md", "test.md", content, 1000)
-            val task_count = query_value(db, "SELECT COUNT(*) FROM tasks")
-            expect(task_count).to_equal("2")
+            expect(task_count(db)).to_equal(2)
+            close_index_db(db)
+
+        it "stores tags from frontmatter and inline":
+            val db = open_index_memory()
+            create_schema(db)
+            val content = "---\ntags: [project]\n---\n\n# Test\n\nContent with #inline tag"
+            index_note(db, "/vault/test.md", "test.md", content, 1000)
+            val note = get_note_by_path(db, "test.md")
+            expect(note.tags).to_contain("project")
+            expect(note.tags).to_contain("inline")
             close_index_db(db)
 
     context "removing notes":
@@ -84,8 +78,8 @@ describe "Indexer":
             expect(note_count(db)).to_equal(1)
             remove_note(db, "test.md")
             expect(note_count(db)).to_equal(0)
-            val link_count = query_value(db, "SELECT COUNT(*) FROM links")
-            expect(link_count).to_equal("0")
+            expect(link_count(db)).to_equal(0)
+            expect(task_count(db)).to_equal(0)
             close_index_db(db)
 
     context "staleness check":

@@ -3,7 +3,7 @@
 # Scans a vault directory recursively and returns all markdown file paths,
 # excluding configured patterns like .obsidian/, .trash/, node_modules/.
 
-extern fn rt_list_dir_recursive(path: text, ext: text) -> [text]
+extern fn rt_dir_walk(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 
 # Default exclude patterns for Obsidian vaults
@@ -17,16 +17,21 @@ fn should_exclude(path: text, excludes: [text]) -> bool:
             return true
     false
 
+# --- Check if path is a markdown file ---
+
+fn is_markdown(path: text) -> bool:
+    path.ends_with(".md")
+
 # --- Scan vault for markdown files ---
 
 fn scan_vault(vault_path: text) -> [text]:
     scan_vault_with_excludes(vault_path, DEFAULT_EXCLUDES)
 
 fn scan_vault_with_excludes(vault_path: text, excludes: [text]) -> [text]:
-    val all_files = rt_list_dir_recursive(vault_path, ".md")
+    val all_files = rt_dir_walk(vault_path) ?? []
     var result: [text] = []
     for file in all_files:
-        if not should_exclude(file, excludes):
+        if is_markdown(file) and not should_exclude(file, excludes):
             result.push(file)
     result
 

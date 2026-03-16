@@ -1,7 +1,6 @@
 # MCP Server — stdio protocol handler
 #
 # Content-Length framed stdio protocol with JSON Lines auto-detection.
-# Adapted from src/app/lsp_mcp/main.spl in the Simple compiler.
 
 use src.util.json_helpers.{js, jp, jo1, jo2, jo3, make_json_result, make_error, safe_substr, extract_field, extract_field_raw, extract_id, extract_nested, extract_arg, tool_text_result, LB, RB}
 use src.mcp.tools.{make_tools_list}
@@ -59,7 +58,7 @@ fn make_init_response(id: text) -> text:
     val server_info = jo3(
         jp("name", js(SERVER_NAME)),
         jp("version", js(SERVER_VERSION)),
-        jp("instructions", js("Obsidian vault search MCP server with hybrid BM25/graph ranking. Set OBSIDIAN_VAULT_PATH to your vault directory."))
+        jp("instructions", js("Obsidian vault search MCP server with hybrid text/graph ranking. Set OBSIDIAN_VAULT_PATH to your vault directory."))
     )
     val result = jo3(
         jp("protocolVersion", js("2025-06-18")),
@@ -71,17 +70,11 @@ fn make_init_response(id: text) -> text:
 # --- Server loop ---
 
 fn start_server():
-    # Get vault path from environment
     val vault_path = rt_env_get("OBSIDIAN_VAULT_PATH") ?? ""
-    val db_path = rt_env_get("OBSIDIAN_INDEX_DB") ?? ".obsidian-search/index.db"
 
-    # Open database
-    var db = open_index_db(db_path)
-    if not db.is_valid:
-        db = open_index_memory()
+    var db = open_index_memory()
     create_schema(db)
 
-    # Index vault if path is set
     if vault_path != "":
         reindex_vault(db, vault_path)
 

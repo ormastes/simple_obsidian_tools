@@ -1,10 +1,9 @@
-# Integration test — vault scanning → indexing → FTS5 search
+# Integration test — vault scanning → indexing → search
 
-use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, note_count, query_value}
+use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, note_count, link_count}
 use src.core.search_engine.{search_vault_query, search_by_tag, search_tasks, search_decisions}
 use src.core.graph.{find_backlinks, find_forward_links, find_related, compute_authority}
 
-# Sample vault content (inline fixtures)
 fn index_sample_vault(db: IndexDb):
     val index_md = "---\ntitle: Vault Index\naliases: [home, main]\ntags: [index, hub]\n---\n\n# Vault Index\n\n## Projects\n- [[project-alpha]]\n- [[api-design]]\n\n## Daily\n- [[2024-01-15]]\n\n## Meetings\n- [[standup-notes]]\n\n## Decisions\n- [[adr-001]]"
     index_note(db, "/v/index.md", "index.md", index_md, 2000)
@@ -25,11 +24,9 @@ fn index_sample_vault(db: IndexDb):
     index_note(db, "/v/decisions/adr-001.md", "decisions/adr-001.md", adr_md, 2000)
 
 describe "VaultIndex":
-    """Integration: scan → index → search pipeline"""
+    """Integration: index → search pipeline"""
 
     context "indexing":
-        """Full vault indexing"""
-
         it "indexes all sample notes":
             val db = open_index_memory()
             create_schema(db)
@@ -41,14 +38,10 @@ describe "VaultIndex":
             val db = open_index_memory()
             create_schema(db)
             index_sample_vault(db)
-            val link_count = query_value(db, "SELECT COUNT(*) FROM links")
-            val count = int(link_count) ?? 0
-            expect(count).to_be_greater_than(10)
+            expect(link_count(db)).to_be_greater_than(10)
             close_index_db(db)
 
     context "search":
-        """Searching indexed vault"""
-
         it "finds notes by tag":
             val db = open_index_memory()
             create_schema(db)
@@ -74,24 +67,19 @@ describe "VaultIndex":
             close_index_db(db)
 
     context "graph":
-        """Graph operations on indexed vault"""
-
         it "finds backlinks to well-connected notes":
             val db = open_index_memory()
             create_schema(db)
             index_sample_vault(db)
             val results = find_backlinks(db, "projects/project-alpha.md")
-            # index, daily, standup, adr all link to project-alpha
             expect(results.len()).to_be_greater_than(0)
             close_index_db(db)
 
-        it "computes authority for hub notes":
+        it "computes authority for linked notes":
             val db = open_index_memory()
             create_schema(db)
             index_sample_vault(db)
-            val auth_index = compute_authority(db, "index.md")
             val auth_alpha = compute_authority(db, "projects/project-alpha.md")
-            # project-alpha should have high authority (many notes link to it)
             expect(auth_alpha).to_be_greater_than(0.0)
             close_index_db(db)
 

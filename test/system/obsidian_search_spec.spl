@@ -2,7 +2,7 @@
 #
 # Tests the full pipeline: index fixture vault → search → verify ranked results
 
-use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, note_count, query_value}
+use src.core.indexer.{IndexDb, open_index_memory, close_index_db, create_schema, index_note, note_count, link_count}
 use src.core.search_engine.{search_vault_query, search_by_tag, search_tasks, search_decisions}
 use src.core.graph.{find_backlinks, find_forward_links, find_related, find_authoritative_docs, graph_walk, compute_authority}
 use src.core.ranker.{rank_results, explain_scores}
@@ -47,9 +47,8 @@ describe "ObsidianSearchSystem":
 
         it "stores correct link graph":
             val db = setup_full_vault()
-            val link_count_str = query_value(db, "SELECT COUNT(*) FROM links")
-            val link_count = int(link_count_str) ?? 0
-            expect(link_count).to_be_greater_than(10)
+            val lc = link_count(db)
+            expect(lc).to_be_greater_than(10)
             close_index_db(db)
 
     context "Scenario: Tag-based discovery":
