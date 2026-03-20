@@ -7,7 +7,7 @@ extern fn rt_dir_walk(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 
 # Default exclude patterns for Obsidian vaults
-val DEFAULT_EXCLUDES: [text] = [".obsidian/", ".trash/", "node_modules/", ".git/"]
+val DEFAULT_EXCLUDES: [text] = [".obsidian/", ".trash/", "node_modules/", ".git/", "/archive/"]
 
 # --- Check if path should be excluded ---
 
