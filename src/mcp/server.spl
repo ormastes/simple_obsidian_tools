@@ -33,11 +33,11 @@ fn read_stdin_message() -> text:
     if line.starts_with("Content-Length:"):
         var len_str = line.replace("Content-Length:", "")
         len_str = len_str.trim()
-        val content_length = int(len_str)
+        val content_length = int(len_str) ?? 0
         if content_length == 0:
             return ""
         input()
-        var body = input()
+        var body = input(content_length)
         return body
     ""
 
@@ -61,7 +61,7 @@ fn make_init_response(id: text) -> text:
         jp("instructions", js("Obsidian vault search MCP server with hybrid text/graph ranking. Set OBSIDIAN_VAULT_PATH to your vault directory."))
     )
     val result = jo3(
-        jp("protocolVersion", js("2025-06-18")),
+        jp("protocolVersion", js("2024-11-05")),
         jp("capabilities", caps),
         jp("serverInfo", server_info)
     )

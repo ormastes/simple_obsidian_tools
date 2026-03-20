@@ -7,10 +7,13 @@
 # 4. Authority score
 # 5. Recency boost
 # 6. Semantic rerank (deferred)
+#
+# Performance: uses cached authority/backlink scores, quicksort,
+# indexed backlink lookups, and early termination.
 
-use src.core.indexer.{IndexDb, count_inbound_links, all_links}
+use src.core.indexer.{IndexDb, get_cached_backlink_count, get_cached_authority, is_cache_valid, get_links_to_target}
 use src.core.search_engine.{SearchResult, search_vault_query, search_by_tag, apply_tag_filter, apply_path_filter, apply_title_filter}
-use src.core.graph.{compute_authority, note_name_from_path}
+use src.core.graph.{compute_authority, note_name_from_path, strip_extension}
 use src.util.query_parser.{ParsedQuery, has_filters}
 
 extern fn rt_time_now_unix_micros() -> i64
@@ -51,6 +54,30 @@ fn compute_recency_boost(mtime: i64) -> f64:
         return 0.0
     boost
 
+# --- Quicksort for ScoredResult by final_score descending ---
+
+fn quicksort_scored(arr: [ScoredResult], low: i64, high: i64):
+    if low >= high:
+        return
+    val pivot_score = arr[(low + high) / 2].final_score
+    var i = low
+    var j = high
+    while i <= j:
+        while arr[i].final_score > pivot_score:
+            i = i + 1
+        while arr[j].final_score < pivot_score:
+            j = j - 1
+        if i <= j:
+            val tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+            i = i + 1
+            j = j - 1
+    if low < j:
+        quicksort_scored(arr, low, j)
+    if i < high:
+        quicksort_scored(arr, i, high)
+
 # --- Main ranking pipeline ---
 
 fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
@@ -71,18 +98,37 @@ fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
 
     # Stages 3-5: Score each candidate
     var scored: [ScoredResult] = []
-    val db_links = all_links(db)
+    val use_cache = is_cache_valid()
+
     for candidate in candidates:
-        # Stage 3: Graph reranking — count backlinks
-        val candidate_name = note_name_from_path(candidate.path)
+        # Stage 3: Graph reranking — count backlinks (cached)
         var backlink_count: i64 = 0
-        for link in db_links:
-            if link.dst_path == candidate_name or link.dst_path == candidate.path:
-                backlink_count = backlink_count + 1
+        if use_cache:
+            backlink_count = get_cached_backlink_count(candidate.path)
+        else:
+            val candidate_name = note_name_from_path(candidate.path)
+            val candidate_stripped = strip_extension(candidate.path)
+            var seen_bl: {text: bool} = {}
+            var bl_targets: [text] = [candidate_name]
+            if candidate.path != candidate_name:
+                bl_targets.push(candidate.path)
+            if candidate_stripped != candidate_name and candidate_stripped != candidate.path:
+                bl_targets.push(candidate_stripped)
+            for bl_target in bl_targets:
+                val bl_links = get_links_to_target(db, bl_target)
+                for link in bl_links:
+                    val k = str(link.src_note_id)
+                    if not seen_bl[k].?:
+                        seen_bl[k] = true
+                        backlink_count = backlink_count + 1
         val graph_boost = float(backlink_count) * 0.5
 
-        # Stage 4: Authority score
-        val authority = compute_authority(db, candidate.path)
+        # Stage 4: Authority score (cached)
+        var authority = 0.0
+        if use_cache:
+            authority = get_cached_authority(candidate.path)
+        else:
+            authority = compute_authority(db, candidate.path)
         val authority_boost = authority * 0.3
 
         # Stage 5: Recency boost
@@ -111,18 +157,13 @@ fn rank_results(db: IndexDb, query: ParsedQuery, limit: i64) -> [ScoredResult]:
             breakdown: breakdown
         ))
 
-    # Sort by final_score descending (selection sort)
-    for i in 0..scored.len():
-        var max_idx = i
-        for j in (i + 1)..scored.len():
-            if scored[j].final_score > scored[max_idx].final_score:
-                max_idx = j
-        if max_idx != i:
-            val tmp = scored[i]
-            scored[i] = scored[max_idx]
-            scored[max_idx] = tmp
+    # Sort by final_score descending (quicksort)
+    if scored.len() > 1:
+        quicksort_scored(scored, 0, scored.len() - 1)
 
     # Return top N
+    if scored.len() <= limit:
+        return scored
     var final_results: [ScoredResult] = []
     var count = 0
     for s in scored:

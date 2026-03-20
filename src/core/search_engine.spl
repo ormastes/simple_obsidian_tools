@@ -2,6 +2,8 @@
 #
 # Searches the in-memory index using simple text matching
 # with term-frequency scoring as a BM25 approximation.
+#
+# Performance: uses .push() instead of array concat, quicksort instead of selection sort.
 
 use src.core.indexer.{IndexDb, NoteRecord, ChunkRecord, LinkRecord, TaskRecord, get_note_by_id, get_chunks_for_note, all_notes, all_chunks, all_tasks}
 use src.util.json_helpers.{safe_substr}
@@ -25,12 +27,12 @@ fn tokenize(text_content: text) -> [text]:
     for ch in text_content:
         if ch == " " or ch == "\n" or ch == "\r" or ch == "\t" or ch == "," or ch == "." or ch == ":" or ch == ";" or ch == "(" or ch == ")" or ch == "[" or ch == "]":
             if current.len() > 0:
-                tokens = tokens + [current.join("")]
+                tokens.push(current.join(""))
                 current = []
         else:
-            current = current + [ch]
+            current.push(ch)
     if current.len() > 0:
-        tokens = tokens + [current.join("")]
+        tokens.push(current.join(""))
     tokens
 
 # --- Simple text matching score ---
@@ -43,6 +45,30 @@ fn text_match_score(text_content: text, query_tokens: [text]) -> f64:
         if lower_text.contains(lower_token):
             score = score + 1.0
     score
+
+# --- Quicksort for SearchResult by bm25_score descending ---
+
+fn quicksort_results(arr: [SearchResult], low: i64, high: i64):
+    if low >= high:
+        return
+    val pivot_score = arr[(low + high) / 2].bm25_score
+    var i = low
+    var j = high
+    while i <= j:
+        while arr[i].bm25_score > pivot_score:
+            i = i + 1
+        while arr[j].bm25_score < pivot_score:
+            j = j - 1
+        if i <= j:
+            val tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+            i = i + 1
+            j = j - 1
+    if low < j:
+        quicksort_results(arr, low, j)
+    if i < high:
+        quicksort_results(arr, i, high)
 
 # --- Search notes by text matching ---
 
@@ -86,25 +112,21 @@ fn search_vault_query(db: IndexDb, query_text: text, limit: i64) -> [SearchResul
                 tags: note.tags,
                 mtime: note.mtime
             )
-            results = results + [sr]
+            results.push(sr)
 
-    # Sort by score descending
-    for i in 0..results.len():
-        var max_idx = i
-        for j in (i + 1)..results.len():
-            if results[j].bm25_score > results[max_idx].bm25_score:
-                max_idx = j
-        if max_idx != i:
-            val tmp = results[i]
-            results[i] = results[max_idx]
-            results[max_idx] = tmp
+    # Sort by score descending (quicksort)
+    if results.len() > 1:
+        quicksort_results(results, 0, results.len() - 1)
 
+    # Return top N
+    if results.len() <= limit:
+        return results
     var final_results: [SearchResult] = []
     var count = 0
     for r in results:
         if count >= limit:
             break
-        final_results = final_results + [r]
+        final_results.push(r)
         count = count + 1
     final_results
 
@@ -114,21 +136,21 @@ fn apply_tag_filter(db: IndexDb, results: [SearchResult], tag: text) -> [SearchR
     var filtered: [SearchResult] = []
     for r in results:
         if r.tags.contains(tag):
-            filtered = filtered + [r]
+            filtered.push(r)
     filtered
 
 fn apply_path_filter(results: [SearchResult], path_prefix: text) -> [SearchResult]:
     var filtered: [SearchResult] = []
     for r in results:
         if r.path.starts_with(path_prefix) or r.path.contains(path_prefix):
-            filtered = filtered + [r]
+            filtered.push(r)
     filtered
 
 fn apply_title_filter(results: [SearchResult], title_substr: text) -> [SearchResult]:
     var filtered: [SearchResult] = []
     for r in results:
         if r.title.contains(title_substr):
-            filtered = filtered + [r]
+            filtered.push(r)
     filtered
 
 # --- Search by tag ---
@@ -147,7 +169,7 @@ fn search_by_tag(db: IndexDb, tag: text) -> [SearchResult]:
                 tags: note.tags,
                 mtime: note.mtime
             )
-            results = results + [sr]
+            results.push(sr)
     results
 
 # --- Search tasks ---
@@ -171,7 +193,7 @@ fn search_tasks(db: IndexDb, query_text: text, status_filter: text) -> [SearchRe
                     tags: "",
                     mtime: 0
                 )
-                results = results + [sr]
+                results.push(sr)
     results
 
 # --- Search decision-related chunks ---
@@ -204,7 +226,7 @@ fn search_decisions(db: IndexDb, query_text: text) -> [SearchResult]:
                     tags: "",
                     mtime: 0
                 )
-                results = results + [sr]
+                results.push(sr)
     results
 
 # --- Read full note content from chunks ---
@@ -221,7 +243,7 @@ fn read_note_content(db: IndexDb, path: text) -> text:
     val chunks = get_chunks_for_note(db, note_id)
     var parts: [text] = []
     for c in chunks:
-        parts = parts + [c.text_content]
+        parts.push(c.text_content)
     parts.join("\n")
 
 # --- LIKE search (compatibility alias) ---
